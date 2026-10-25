@@ -31,7 +31,7 @@ jobs:
         run: |
           raglens --version
           raglens evaluate --question "What database is used?" \
-            --context "The service stores records in PostgreSQL." \
+            --context "The service stores records in a PostgreSQL database." \
             --answer "It uses PostgreSQL." --fail-on needs_review
 
   package:
