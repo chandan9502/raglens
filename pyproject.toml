@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "raglens"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A lightweight, explainable baseline evaluator for RAG answers"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -19,17 +19,36 @@ classifiers = [
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Typing :: Typed",
 ]
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.5", "build>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/chandan9502/raglens"
+Issues = "https://github.com/chandan9502/raglens/issues"
 
 [project.scripts]
 raglens = "raglens.cli:main"
 
+[tool.setuptools.dynamic]
+version = {attr = "raglens.__version__"}
+
 [tool.setuptools.packages.find]
-include = ["raglens*"]
+where = ["src"]
+
+[tool.setuptools.package-data]
+raglens = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

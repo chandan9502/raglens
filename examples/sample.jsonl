@@ -1,0 +1,3 @@
+{"question": "What database stores the records?", "context": "The service stores customer records in PostgreSQL.", "answer": "Customer records are stored in PostgreSQL."}
+{"question": "What is the request timeout?", "context": "Requests time out after 30 seconds.", "answer": "Requests time out after 60 seconds."}
+{"question": "What database stores the records?", "context": "The frontend is built with React and served by nginx.", "answer": "Records are stored in MongoDB."}
