@@ -20,16 +20,19 @@ answers that human annotators checked for hallucinations
 | Setting (RAGTruth QA test split) | Precision | Recall | F1 |
 |---|---:|---:|---:|
 | Flag every answer (reference) | 0.178 | 1.000 | 0.302 |
-| Default thresholds, `--fail-on needs_review` | 0.400 | 0.350 | 0.373 |
-| Threshold tuned on the train split, `--fail-on needs_review` | 0.281 | 0.894 | 0.428 |
+| Default thresholds, `--fail-on needs_review` | 0.496 | 0.350 | 0.410 |
+| Threshold tuned on the train split, `--fail-on needs_review` | 0.309 | 0.831 | 0.450 |
 
 - `answer_support` ranks unsupported answers below supported ones better than chance
   (ROC AUC 0.756, where 0.5 is a coin flip).
-- With a tuned threshold it catches about 9 in 10 unsupported answers, but about 7 in 10 of its
+- With a tuned threshold it catches about 8 in 10 unsupported answers, but about 7 in 10 of its
   flags are false alarms. It is a cheap first filter, not a judge.
+- Recognising refusals ("Unable to answer based on given passages.") helps: with refusal detection
+  switched off, the same tuned setup scores F1 0.428. None of the 27 test answers recognised as
+  refusals had been labelled unsupported.
 - On HaluEval's constructed wrong answers it does much better (F1 0.798 with default thresholds and
   `--fail-on partially_supported`), and neither threshold tuned on RAGTruth beats that there
-  (0.743 and 0.698). The best setting for one dataset is not the best for another: calibrate on
+  (0.743 and 0.663). The best setting for one dataset is not the best for another: calibrate on
   labelled examples from your own system (see [Calibrate thresholds](#calibrate-thresholds)).
 
 ## Install
@@ -66,7 +69,8 @@ raglens evaluate \
     "All meaningful answer terms appear in the context under this lexical check."
   ],
   "limitations": ["..."],
-  "warnings": []
+  "warnings": [],
+  "abstained": false
 }
 ```
 
@@ -127,8 +131,8 @@ Abridged output on the RAGTruth QA train split:
   "fail_on": "needs_review",
   "tuned_threshold": "review",
   "examples": 5034,
-  "current": {"threshold": 0.5, "precision": 0.499, "recall": 0.3088, "f1": 0.3815},
-  "best": {"threshold": 0.74, "precision": 0.4498, "recall": 0.8478, "f1": 0.5878},
+  "current": {"threshold": 0.5, "precision": 0.6406, "recall": 0.3088, "f1": 0.4167},
+  "best": {"threshold": 0.71, "precision": 0.5091, "recall": 0.7896, "f1": 0.619},
   "answer_support_auc": 0.734
 }
 ```
@@ -136,11 +140,31 @@ Abridged output on the RAGTruth QA train split:
 Then check the threshold on **different** labelled data before you rely on it:
 
 ```bash
-raglens batch labelled_test.jsonl --review-threshold 0.74 --fail-on needs_review
+raglens batch labelled_test.jsonl --review-threshold 0.71 --fail-on needs_review
 ```
 
 All three thresholds can be set on `evaluate`, `batch` and `calibrate`: `--support-threshold`,
 `--review-threshold` and `--relevance-threshold`.
+
+### Refusals
+
+An answer that only declines to answer, such as "Unable to answer based on the given passages." or
+"I don't know.", makes no claims, so RAGLens gives it the verdict `abstained` (and
+`"abstained": true`) instead of flagging it. `--fail-on` never fails an abstention, and `batch`
+counts them, so you can track your system's refusal rate.
+
+A refusal may restate the question ("The passages do not say when the cafe opened."), but if it
+adds anything else, such as "...but it opened in Lyon", the answer is scored as usual. Whether
+refusing was the *right* call is not checked.
+
+If your system declines with its own wording, add it (repeatable):
+
+```bash
+raglens batch answers.jsonl --abstention-phrase "not in our help centre"
+```
+
+`--no-abstentions` turns the check off. In Python, use `abstention_phrases=[...]` and
+`detect_abstentions=False`.
 
 ## Python API
 
@@ -174,6 +198,8 @@ print(relaxed.answer_support, relaxed.verdict)  # 0.75 likely_supported
 - `warnings` flag numbers in the answer that are not in the context, and answer/context
   disagreeing on whether negation words (`not`, `no`, `never`...) appear. Any warning
   stops a result from being `likely_supported`.
+- An answer whose every sentence is a refusal, and which adds no new terms, gets `abstained`
+  before any threshold is applied (see [Refusals](#refusals)). Its scores are computed as usual.
 
 ## Known limitations
 
@@ -184,11 +210,11 @@ These are properties of a word-overlap baseline, not bugs:
   `needs_review`, even though the context answers the question.
 - **A matching answer can still be wrong.** Word overlap is not entailment. The negation and number
   warnings are rough flags, not understanding. On RAGTruth the number warning was right 53% of the
-  time (base rate 31%), but the negation warning only 33%, so treat it as a prompt to look, not as
+  time (base rate 31%), but the negation warning only 35%, so treat it as a prompt to look, not as
   evidence.
-- **Refusals get flagged.** An answer such as "Unable to answer based on given passages." uses
-  words that are not in the context. In the RAGTruth train split, 264 answers start with "Unable to
-  answer" and are labelled supported; RAGLens marked 257 of them `needs_review`.
+- **Refusals are recognised by wording only.** The built-in patterns are English. A refusal phrased
+  some other way is scored like a normal answer (add your wording with `--abstention-phrase`).
+  RAGLens also cannot tell a justified refusal from one where the context did contain the answer.
 - Scores are not probabilities. Calibration picks better cut-offs for your data; it does not turn
   word overlap into a confidence.
 - English-oriented tokenization and stop words.
@@ -214,7 +240,7 @@ python benchmarks/run_benchmarks.py   # rewrites benchmarks/RESULTS.md
 
 Ideas, not promises. Issues and discussion welcome.
 
-- Recognise refusals such as "unable to answer" instead of flagging them
+- Spot refusals that were not justified (the context did contain the answer)
 - Optional semantic-similarity backend, measured on the same benchmark
 - Adapters for common RAG frameworks
 - Optional model-based evaluation with documented judge prompts

@@ -29,8 +29,10 @@ HERE = Path(__file__).resolve().parent
 DATA = HERE / "data"
 LEVELS = ("partially_supported", "needs_review")
 
+Dataset = tuple[list[EvaluationReport], list[bool]]
 
-def load(name: str) -> tuple[list[EvaluationReport], list[bool]]:
+
+def load(name: str, detect_abstentions: bool = True) -> Dataset:
     """Score every row of a prepared file once. Returns reports and labels."""
     path = DATA / name
     if not path.exists():
@@ -38,20 +40,31 @@ def load(name: str) -> tuple[list[EvaluationReport], list[bool]]:
     reports, unsupported = [], []
     with path.open(encoding="utf-8") as f:
         for line in f:
-            row = json.loads(line)
-            reports.append(evaluate(row["question"], row["context"], row["answer"]))
-            unsupported.append(row["label"] == "unsupported")
+            item = json.loads(line)
+            question, context, answer = item["question"], item["context"], item["answer"]
+            reports.append(evaluate(question, context, answer, detect_abstentions=detect_abstentions))
+            unsupported.append(item["label"] == "unsupported")
     return reports, unsupported
 
 
 def metrics_at(reports: Sequence[EvaluationReport], unsupported: Sequence[bool],
                thresholds: Thresholds, level: str) -> dict:
     """Metrics if you ran `--fail-on level` with these thresholds."""
-    flags = [
-        is_flagged(decide_verdict(r.answer_support, r.context_relevance, bool(r.warnings), thresholds), level)
+    verdicts = [
+        decide_verdict(r.answer_support, r.context_relevance, bool(r.warnings), thresholds, r.abstained)
         for r in reports
     ]
-    return binary_metrics(flags, unsupported)
+    return binary_metrics([is_flagged(v, level) for v in verdicts], unsupported)
+
+
+def tune(train: Dataset) -> dict[str, tuple[str, float, Thresholds]]:
+    """Pick one threshold per --fail-on level on the train split only."""
+    result = {}
+    for level in LEVELS:
+        best = calibrate(*train, fail_on=level)
+        name, value = best["tuned_threshold"], best["best"]["threshold"]
+        result[level] = (name, value, Thresholds(**{name: value}))
+    return result
 
 
 def flag_everything(unsupported: Sequence[bool]) -> dict:
@@ -70,10 +83,14 @@ NOTES = [
     "*unsupported* if annotators marked at least one hallucinated span in it. That includes spans "
     "annotators tagged `implicit_true` (true, but not stated in the passages), because RAGLens "
     "checks support by the passages.",
+    "- RAGTruth's prompt told models to reply \"Unable to answer based on given passages.\" when the "
+    "passages lacked the answer. RAGLens recognises refusals with its built-in, general patterns; no "
+    "dataset-specific phrase is passed.",
     "- HaluEval QA labels come from how the data was built: the HotpotQA answer is *supported*, a "
     "ChatGPT-written plausible wrong answer is *unsupported*. Right answers are short (median 2 "
     "words) while wrong ones are sentences (median 9 words), a difference that suits a "
-    "word-overlap check.",
+    "word-overlap check. A few of the \"wrong\" answers are refusals (\"The television series is not "
+    "specified.\"); RAGLens marks those `abstained`, which counts as a miss here.",
     "- Thresholds were chosen with `raglens calibrate` (best F1 on a 0.01 grid) on RAGTruth train. "
     "The test split and HaluEval were never used for tuning.",
     "- The model-based detectors evaluated in the [RAGTruth paper](https://arxiv.org/abs/2401.00396) "
@@ -82,7 +99,39 @@ NOTES = [
 ]
 
 
-def warning_table(datasets: dict[str, tuple[list[EvaluationReport], list[bool]]]) -> list[str]:
+def results_table(title: str, data: Dataset, tuned: dict) -> list[str]:
+    reports, unsupported = data
+    n, k = len(unsupported), sum(unsupported)
+    lines = [f"## {title}", "", f"{n:,} answers, {k:,} unsupported ({k / n:.1%}).", "", HEADER,
+             row("Flag everything (reference)", flag_everything(unsupported))]
+    for level in LEVELS:
+        lines.append(row(f"Default thresholds, `--fail-on {level}`",
+                         metrics_at(reports, unsupported, Thresholds(), level)))
+    for level in LEVELS:
+        name, value, thresholds = tuned[level]
+        lines.append(row(f"Tuned on RAGTruth train ({name} = {value}), `--fail-on {level}`",
+                         metrics_at(reports, unsupported, thresholds, level)))
+    auc = roc_auc([r.answer_support for r in reports], unsupported)
+    abstained = [u for r, u in zip(reports, unsupported, strict=True) if r.abstained]
+    lines += ["", f"`answer_support` ROC AUC: **{auc:.3f}** (0.5 = coin flip, 1.0 = perfect ranking). "
+              f"Answers marked `abstained` (refusals): {len(abstained):,}, of which {sum(abstained):,} "
+              "labelled unsupported.", ""]
+    return lines
+
+
+def refusal_ablation(test_on: Dataset, test_off: Dataset, tuned_on: dict, tuned_off: dict) -> list[str]:
+    """Same test split with and without refusal detection, each tuned on train its own way."""
+    lines = ["## Effect of recognising refusals (RAGTruth QA test)", "",
+             "Each configuration has its own thresholds, tuned on the train split.", "", HEADER]
+    for label, (reports, unsupported), tuned in (("off", test_off, tuned_off), ("on", test_on, tuned_on)):
+        for level in LEVELS:
+            name, value, thresholds = tuned[level]
+            lines.append(row(f"Refusal detection {label}, tuned {name} = {value}, `--fail-on {level}`",
+                             metrics_at(reports, unsupported, thresholds, level)))
+    return lines + [""]
+
+
+def warning_table(datasets: dict[str, Dataset]) -> list[str]:
     lines = ["| Warning | Dataset | Fired on | Share of those really unsupported | Base rate |",
              "|---|---|---:|---:|---:|"]
     for prefix, label in (("Numbers", "Number not in context"), ("Negation", "Negation mismatch")):
@@ -97,17 +146,14 @@ def warning_table(datasets: dict[str, tuple[list[EvaluationReport], list[bool]]]
 
 
 def main() -> None:
-    train = load("ragtruth_qa_train.jsonl")
-    test = load("ragtruth_qa_test.jsonl")
-    halu = load("halueval_qa.jsonl")
-    default = Thresholds()
+    train, test, halu = (load(f) for f in ("ragtruth_qa_train.jsonl", "ragtruth_qa_test.jsonl",
+                                           "halueval_qa.jsonl"))
+    tuned = tune(train)
 
-    # Tune one threshold per --fail-on level on the TRAIN split only.
-    tuned = {level: calibrate(*train, fail_on=level, base=default) for level in LEVELS}
-    calibrated = {
-        "partially_supported": Thresholds(support=tuned["partially_supported"]["best"]["threshold"]),
-        "needs_review": Thresholds(review=tuned["needs_review"]["best"]["threshold"]),
-    }
+    # The same split with refusal detection switched off, for the comparison table.
+    train_off = load("ragtruth_qa_train.jsonl", detect_abstentions=False)
+    test_off = load("ragtruth_qa_test.jsonl", detect_abstentions=False)
+    tuned_off = tune(train_off)
 
     out = [
         "# RAGLens benchmark results",
@@ -117,28 +163,13 @@ def main() -> None:
         "Data: see `benchmarks/prepare_data.py` (pinned commits, SHA-256 checked).",
         "",
         "Positive class = **unsupported** answer. *Flagged* = RAGLens would fail the answer with "
-        "the given `--fail-on` level. Thresholds were tuned on RAGTruth **train** only.",
+        "the given `--fail-on` level. Thresholds were tuned on RAGTruth **train** only. "
+        "Refusal detection is on (the default) unless a row says otherwise.",
         "",
     ]
-
-    for title, (reports, unsupported) in (
-        ("RAGTruth QA, held-out test split (human labels)", test),
-        ("HaluEval QA (constructed right/wrong answer pairs)", halu),
-    ):
-        n, k = len(unsupported), sum(unsupported)
-        out += [f"## {title}", "", f"{n:,} answers, {k:,} unsupported ({k / n:.1%}).", "", HEADER,
-                row("Flag everything (reference)", flag_everything(unsupported))]
-        for level in LEVELS:
-            out.append(row(f"Default thresholds, `--fail-on {level}`",
-                           metrics_at(reports, unsupported, default, level)))
-        for level in LEVELS:
-            name = tuned[level]["tuned_threshold"]
-            value = tuned[level]["best"]["threshold"]
-            out.append(row(f"Tuned on RAGTruth train ({name} = {value}), `--fail-on {level}`",
-                           metrics_at(reports, unsupported, calibrated[level], level)))
-        auc = roc_auc([r.answer_support for r in reports], unsupported)
-        out += ["", f"`answer_support` ROC AUC: **{auc:.3f}** (0.5 = coin flip, 1.0 = perfect ranking).", ""]
-
+    out += results_table("RAGTruth QA, held-out test split (human labels)", test, tuned)
+    out += results_table("HaluEval QA (constructed right/wrong answer pairs)", halu, tuned)
+    out += refusal_ablation(test, test_off, tuned, tuned_off)
     out += ["## What the warnings are worth", "",
             "How often each warning fired, and how often it was right. A useful warning is right "
             "more often than the base rate. RAGTruth numbers use the train split.", ""]

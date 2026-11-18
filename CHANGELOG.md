@@ -10,11 +10,18 @@
 - `--support-threshold`, `--review-threshold` and `--relevance-threshold` on every command, and a
   `Thresholds` object for `evaluate()` in Python. Defaults are unchanged (0.8 / 0.5 / 0.25).
 - `raglens.metrics` (`binary_metrics`, `roc_auc`) and `raglens.calibrate`, with no new dependencies.
+- Refusals: an answer that only declines to answer ("Unable to answer based on the given
+  passages.", "I don't know.") gets the new verdict `abstained` and `"abstained": true`, and is
+  never flagged by `--fail-on`. `--abstention-phrase` adds your own wording; `--no-abstentions`
+  turns the check off (`abstention_phrases` / `detect_abstentions` in Python). On RAGTruth's test
+  split this raised the best F1 from 0.428 to 0.450.
 - `benchmarks/`: reproducible evaluation on RAGTruth (human labels) and HaluEval QA, with results
   in `benchmarks/RESULTS.md` and a summary in the README.
 - `examples/labelled_sample.jsonl`.
 
 ### Changed
+- `VERDICTS` now starts with `"abstained"`, and `batch` verdict counts include it.
+- The negation warning is no longer raised for refusals, which are worded negatively by nature.
 - The verdict is now decided from the rounded scores shown in the report, so the two always agree.
   Before, a score shown as 0.8 could in rare cases come from 0.79996 and miss `likely_supported`.
 
@@ -23,8 +30,7 @@
   that the old form stops being supported in February 2027. Building now needs setuptools 77+.
 
 ### Documented
-- Measured limitations: the negation warning barely beats the base rate on RAGTruth, and refusals
-  such as "Unable to answer..." are usually flagged `needs_review`.
+- Measured limitations: the negation warning barely beats the base rate on RAGTruth (35% vs 31%).
 
 ## 0.2.0
 
