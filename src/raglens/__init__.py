@@ -1,5 +1,14 @@
 """RAGLens: transparent baseline checks for RAG answers."""
-from .evaluator import VERDICTS, EvaluationReport, evaluate
+from .calibration import calibrate
+from .evaluator import DEFAULT_THRESHOLDS, VERDICTS, EvaluationReport, Thresholds, evaluate
 
-__version__ = "0.2.0"
-__all__ = ["VERDICTS", "EvaluationReport", "__version__", "evaluate"]
+__version__ = "0.3.0"
+__all__ = [
+    "DEFAULT_THRESHOLDS",
+    "VERDICTS",
+    "EvaluationReport",
+    "Thresholds",
+    "__version__",
+    "calibrate",
+    "evaluate",
+]
