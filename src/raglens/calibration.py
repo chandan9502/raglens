@@ -70,7 +70,7 @@ def calibrate(
 
     def measure(thresholds: Thresholds) -> dict[str, float]:
         verdicts = [
-            decide_verdict(r.answer_support, r.context_relevance, bool(r.warnings), thresholds)
+            decide_verdict(r.answer_support, r.context_relevance, bool(r.warnings), thresholds, r.abstained)
             for r in reports
         ]
         return binary_metrics([is_flagged(v, fail_on) for v in verdicts], unsupported)

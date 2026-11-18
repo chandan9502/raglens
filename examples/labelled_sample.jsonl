@@ -8,3 +8,4 @@
 {"question": "What does the free plan include?", "context": "The free plan includes 3 projects and community support. Paid plans add single sign-on.", "answer": "The free plan includes single sign-on and unlimited projects.", "label": "unsupported"}
 {"question": "Is the API rate limited?", "context": "The public API allows 100 requests per minute for each key.", "answer": "Yes, each key can make 100 requests per minute.", "label": "supported"}
 {"question": "Where is the office?", "context": "The company's only office is in Glasgow.", "answer": "The office is in Edinburgh.", "label": "unsupported"}
+{"question": "When did the office open?", "context": "The company's only office is in Glasgow.", "answer": "Unable to answer based on the given passages.", "label": "supported"}

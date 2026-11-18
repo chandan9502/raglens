@@ -55,7 +55,8 @@ def _unit_interval(text: str) -> float:
     return value
 
 
-def _add_threshold_args(parser: argparse.ArgumentParser) -> None:
+def _add_verdict_args(parser: argparse.ArgumentParser) -> None:
+    """Flags that change how scores become a verdict (shared by every command)."""
     group = parser.add_argument_group("verdict thresholds (defaults are hand-picked, not tuned)")
     d = DEFAULT_THRESHOLDS
     group.add_argument(
@@ -70,15 +71,33 @@ def _add_threshold_args(parser: argparse.ArgumentParser) -> None:
         "--relevance-threshold", type=_unit_interval, default=d.relevance, metavar="X",
         help=f"context_relevance below this gives needs_review (default {d.relevance})",
     )
+    refusals = parser.add_argument_group("refusals (answers that decline to answer)")
+    refusals.add_argument(
+        "--abstention-phrase", action="append", default=[], metavar="TEXT",
+        help='Extra wording your system uses to decline, e.g. "not in our help centre" (repeatable)',
+    )
+    refusals.add_argument(
+        "--no-abstentions", action="store_true",
+        help="Do not recognise refusals; score them like any other answer",
+    )
 
 
-def _thresholds(parser: argparse.ArgumentParser, args: argparse.Namespace) -> Thresholds:
+def _evaluate_options(parser: argparse.ArgumentParser, args: argparse.Namespace) -> dict[str, Any]:
+    """Keyword arguments for evaluate(), built from the shared flags."""
+    for phrase in args.abstention_phrase:
+        if not any(ch.isalnum() for ch in phrase):
+            parser.error(f"--abstention-phrase needs at least one word, got {phrase!r}")
     try:
-        return Thresholds(
+        thresholds = Thresholds(
             support=args.support_threshold, review=args.review_threshold, relevance=args.relevance_threshold
         )
     except ValueError as exc:
         parser.error(str(exc))
+    return {
+        "thresholds": thresholds,
+        "abstention_phrases": tuple(args.abstention_phrase),
+        "detect_abstentions": not args.no_abstentions,
+    }
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -97,7 +116,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ev.add_argument(f"--{name}-file", help=f"{what} (path to a UTF-8 text file)")
     ev.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
     ev.add_argument("--fail-on", choices=_FAIL_ON_CHOICES, help=fail_help)
-    _add_threshold_args(ev)
+    _add_verdict_args(ev)
 
     ba = sub.add_parser(
         "batch",
@@ -106,7 +125,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ba.add_argument("path", help="Path to a .jsonl file")
     ba.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
     ba.add_argument("--fail-on", choices=_FAIL_ON_CHOICES, help=fail_help)
-    _add_threshold_args(ba)
+    _add_verdict_args(ba)
 
     ca = sub.add_parser(
         "calibrate",
@@ -120,7 +139,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ca.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
     ca.add_argument("--no-curve", action="store_true", help="Leave out the per-threshold curve")
-    _add_threshold_args(ca)
+    _add_verdict_args(ca)
     return parser
 
 
@@ -158,12 +177,12 @@ def _load_examples(parser: argparse.ArgumentParser, path: str) -> list[_Example]
 
 
 def _evaluate_all(
-    parser: argparse.ArgumentParser, examples: Sequence[_Example], thresholds: Thresholds
+    parser: argparse.ArgumentParser, examples: Sequence[_Example], options: dict[str, Any]
 ) -> list[EvaluationReport]:
     reports = []
     for ex in examples:
         try:
-            reports.append(evaluate(ex.question, ex.context, ex.answer, thresholds=thresholds))
+            reports.append(evaluate(ex.question, ex.context, ex.answer, **options))
         except ValueError as exc:
             parser.error(f"line {ex.line}: {exc}")
     return reports
@@ -189,11 +208,11 @@ def _label_metrics(examples: Sequence[_Example], reports: Sequence[EvaluationRep
 
 
 def _run_evaluate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    thresholds = _thresholds(parser, args)
+    options = _evaluate_options(parser, args)
     context = _text_arg(parser, "context", args.context, args.context_file)
     answer = _text_arg(parser, "answer", args.answer, args.answer_file)
     try:
-        report = evaluate(args.question, context, answer, thresholds=thresholds)
+        report = evaluate(args.question, context, answer, **options)
     except ValueError as exc:
         parser.error(str(exc))
     print(_dump(report.to_dict(), args.pretty))
@@ -203,9 +222,9 @@ def _run_evaluate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
 
 
 def _run_batch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    thresholds = _thresholds(parser, args)
+    options = _evaluate_options(parser, args)
     examples = _load_examples(parser, args.path)
-    results = _evaluate_all(parser, examples, thresholds)
+    results = _evaluate_all(parser, examples, options)
 
     counts = Counter(r.verdict for r in results)
     summary: dict[str, Any] = {
@@ -224,14 +243,17 @@ def _run_batch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
 
 
 def _run_calibrate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    thresholds = _thresholds(parser, args)
+    options = _evaluate_options(parser, args)
     examples = [ex for ex in _load_examples(parser, args.path) if ex.label is not None]
     if not examples:
         parser.error(f"{args.path!r} has no labelled lines; add \"label\": \"supported\" or \"unsupported\"")
-    reports = _evaluate_all(parser, examples, thresholds)
+    reports = _evaluate_all(parser, examples, options)
     try:
         result = calibrate(
-            reports, [ex.label == "unsupported" for ex in examples], fail_on=args.fail_on, base=thresholds
+            reports,
+            [ex.label == "unsupported" for ex in examples],
+            fail_on=args.fail_on,
+            base=options["thresholds"],
         )
     except ValueError as exc:
         parser.error(str(exc))

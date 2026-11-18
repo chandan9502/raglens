@@ -6,6 +6,7 @@ They compare *words*, not *meaning*.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -79,6 +80,82 @@ def _has_negation(text: str) -> bool:
     return any(t in _NEGATIONS or t.endswith("n't") for t in _tokens(text))
 
 
+# --- Abstentions ---------------------------------------------------------------
+# An answer that only says it cannot answer ("Unable to answer based on the given
+# passages.") makes no claims, so marking it unsupported would be a false alarm.
+_ABSTENTION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"\b(?:unable|not able) to (?:answer|determine|find|provide|say|tell|identify|confirm)\b",
+        r"\b(?:cannot|can't|can not|could not|couldn't) "
+        r"(?:answer|determine|find|provide|say|tell|identify|confirm)\b",
+        r"\b(?:i|we) (?:do not|don't) know\b",
+        r"\b(?:not enough|insufficient|no relevant|no specific|no) (?:information|details|data)\b",
+        r"\b(?:passages?|context|documents?|sources?|texts?|information) (?:provided |given |above )?"
+        r"(?:does|do|did) not (?:contain|provide|mention|include|specify|say|state|answer|give|offer)\b",
+        r"\bthere (?:is|are) no (?:mention|information|indication|details?)\b",
+        # Only verbs about the text itself: "was not included in the album" is a claim.
+        r"\b(?:is|are|was|were) not (?:mentioned|specified|stated)\b",
+    )
+)
+# Words that often surround a refusal, e.g. "Sorry, I am unable to answer based on
+# the given passages." They are allowed in a refusal sentence; any other new word
+# is treated as a possible claim.
+_ABSTENTION_FILLER = frozenset(
+    _stem(word)
+    for word in """
+    based given provided provide passage passages context information document documents source sources
+    text texts question answer answers available mention mentioned contain contains sufficient enough
+    specific relevant detail details according data regarding unable able determine find say tell
+    identify confirm sorry unfortunately apologies apologize apologise afraid am i'm we're currently
+    exact date time year price cost number amount name location reason
+    """.split()
+)
+_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def _normalize(text: str) -> str:
+    return text.lower().replace("’", "'")
+
+
+def _phrase_pattern(phrase: str) -> re.Pattern[str]:
+    """Compile a user's refusal phrase: case-insensitive, any whitespace between words."""
+    if not isinstance(phrase, str):
+        raise TypeError(f"abstention phrases must be strings, got {phrase!r}")
+    words = _normalize(phrase).strip(" \t\n.!?,;:\"'").split()
+    if not words:
+        raise ValueError("abstention phrases must contain at least one word")
+    return re.compile(r"\b" + r"\s+".join(re.escape(word) for word in words) + r"\b")
+
+
+def _is_abstention(answer: str, allowed: set[str], patterns: Sequence[re.Pattern[str]]) -> bool:
+    """True if the answer only declines to answer.
+
+    Every sentence that has content must match a refusal pattern, and once the
+    matched words are removed it may only repeat terms from ``allowed`` (the
+    question and context) or refusal filler words. "The passages do not say when
+    the cafe opened" restates the question, so it still counts. A sentence that
+    adds anything else might be a claim, so the whole answer is then scored
+    normally. That keeps partial answers ("No date is given, but it is in Paris")
+    under review.
+    """
+    saw_refusal = False
+    for sentence in _SENTENCE_RE.split(answer):
+        if not _content_terms(sentence):
+            continue
+        text = _normalize(sentence)
+        spans = [match.span() for pattern in patterns for match in pattern.finditer(text)]
+        if not spans:
+            return False
+        remainder = list(text)
+        for start, end in spans:
+            remainder[start:end] = " " * (end - start)
+        if _content_terms("".join(remainder)).keys() - allowed - _ABSTENTION_FILLER:
+            return False
+        saw_refusal = True
+    return saw_refusal
+
+
 @dataclass(frozen=True)
 class EvaluationReport:
     """Result of :func:`evaluate`. Convert to a plain dict with ``to_dict()``."""
@@ -91,14 +168,17 @@ class EvaluationReport:
     explanations: list[str]
     limitations: list[str]
     warnings: list[str] = field(default_factory=list)
+    abstained: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of this report."""
         return asdict(self)
 
 
-# Ordered from best to worst. The CLI's --fail-on and calibration rely on this order.
-VERDICTS = ("likely_supported", "partially_supported", "needs_review")
+# Ordered from least to most in need of review. The CLI's --fail-on and calibration
+# rely on this order. "abstained" means the answer declined to answer, so it makes
+# no claims to check; it is never flagged.
+VERDICTS = ("abstained", "likely_supported", "partially_supported", "needs_review")
 
 
 @dataclass(frozen=True)
@@ -140,13 +220,17 @@ def decide_verdict(
     context_relevance: float,
     has_warnings: bool,
     thresholds: Thresholds = DEFAULT_THRESHOLDS,
+    abstained: bool = False,
 ) -> str:
     """Turn scores into a verdict.
 
     :func:`evaluate` and calibration both call this function, so a threshold
     suggested by calibration produces exactly the verdicts it was measured with.
-    Any warning stops a result from being ``likely_supported``.
+    An abstention is always ``abstained``, whatever the scores. Otherwise any
+    warning stops a result from being ``likely_supported``.
     """
+    if abstained:
+        return "abstained"
     if answer_support >= thresholds.support and context_relevance >= thresholds.relevance:
         verdict = "likely_supported"
     elif answer_support < thresholds.review or context_relevance < thresholds.relevance:
@@ -159,7 +243,13 @@ def decide_verdict(
 
 
 def evaluate(
-    question: str, context: str, answer: str, *, thresholds: Thresholds | None = None
+    question: str,
+    context: str,
+    answer: str,
+    *,
+    thresholds: Thresholds | None = None,
+    abstention_phrases: Sequence[str] = (),
+    detect_abstentions: bool = True,
 ) -> EvaluationReport:
     """Evaluate an answer against supplied context using lexical overlap.
 
@@ -171,21 +261,32 @@ def evaluate(
     answer that are absent from the context, and a negation mismatch between
     answer and context. Any warning prevents a ``likely_supported`` verdict.
 
+    An answer that only declines to answer ("Unable to answer based on the given
+    passages.") gets the verdict ``abstained`` and ``abstained=True``: it makes no
+    claims, so it is not flagged. Add your own refusal wording with
+    ``abstention_phrases``, or turn the check off with ``detect_abstentions=False``.
+    Scores are computed the same way either way.
+
     ``thresholds`` changes only the verdict, never the scores or warnings.
     Leave it out to use :data:`DEFAULT_THRESHOLDS`.
 
     Raises:
-        ValueError: if any input is not a non-empty string.
+        ValueError: if any input is not a non-empty string, or a phrase is empty.
+        TypeError: if ``abstention_phrases`` is a single string, not a list of them.
     """
     for name, value in (("question", question), ("context", context), ("answer", answer)):
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{name} must be a non-empty string")
     if thresholds is None:
         thresholds = DEFAULT_THRESHOLDS
+    if isinstance(abstention_phrases, str):
+        raise TypeError("abstention_phrases must be a list of strings, not a single string")
+    patterns = _ABSTENTION_PATTERNS + tuple(_phrase_pattern(p) for p in abstention_phrases)
 
     q_terms = _content_terms(question)
     c_terms = _content_terms(context)
     a_terms = _content_terms(answer)
+    abstained = detect_abstentions and _is_abstention(answer, q_terms.keys() | c_terms.keys(), patterns)
 
     # Round once, then use the rounded values everywhere, so the verdict always
     # agrees with the scores shown in the report.
@@ -203,7 +304,12 @@ def evaluate(
     else:
         explanations.append("Some meaningful question terms appear in the context.")
 
-    if not a_terms:
+    if abstained:
+        explanations.append(
+            "The answer declines to answer and adds nothing beyond the question and context, so it "
+            "makes no claims to check. Whether declining was right is not checked."
+        )
+    elif not a_terms:
         explanations.append("The answer has no meaningful terms after basic stop-word filtering.")
     elif unsupported:
         explanations.append(
@@ -219,12 +325,14 @@ def evaluate(
         warnings.append(
             "Numbers in the answer not found in the context: " + ", ".join(missing_numbers) + "."
         )
-    if _has_negation(answer) != _has_negation(context):
+    # A refusal is worded negatively ("cannot answer"), so a negation mismatch
+    # says nothing about it.
+    if not abstained and _has_negation(answer) != _has_negation(context):
         warnings.append(
             "Negation differs between answer and context (e.g. 'not', 'no'); check the meaning."
         )
 
-    verdict = decide_verdict(support, relevance, bool(warnings), thresholds)
+    verdict = decide_verdict(support, relevance, bool(warnings), thresholds, abstained)
 
     return EvaluationReport(
         question=question,
@@ -239,4 +347,5 @@ def evaluate(
             "Negation, numbers, and context contradictions require human review.",
         ],
         warnings=warnings,
+        abstained=abstained,
     )

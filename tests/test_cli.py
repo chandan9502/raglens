@@ -147,7 +147,7 @@ def test_invalid_thresholds_are_usage_errors(bad, capsys):
 def test_batch_reports_label_metrics(capsys):
     assert main(["batch", str(LABELLED)]) == 0
     metrics = json.loads(capsys.readouterr().out)["summary"]["label_metrics"]
-    assert metrics["labelled_examples"] == 10
+    assert metrics["labelled_examples"] == 11
     assert metrics["unsupported_examples"] == 5
     loose = metrics["fail_on_partially_supported"]
     strict = metrics["fail_on_needs_review"]
