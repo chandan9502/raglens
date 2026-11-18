@@ -39,6 +39,14 @@ answers that human annotators checked for hallucinations
 
 Requires Python 3.10+. RAGLens has no runtime dependencies.
 
+Install a release straight from GitHub:
+
+```bash
+pip install "git+https://github.com/chandan9502/raglens@v0.3.0"
+```
+
+Or clone it to work on the code:
+
 ```bash
 git clone https://github.com/chandan9502/raglens.git
 cd raglens
