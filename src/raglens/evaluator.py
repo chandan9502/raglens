@@ -97,10 +97,70 @@ class EvaluationReport:
         return asdict(self)
 
 
+# Ordered from best to worst. The CLI's --fail-on and calibration rely on this order.
 VERDICTS = ("likely_supported", "partially_supported", "needs_review")
 
 
-def evaluate(question: str, context: str, answer: str) -> EvaluationReport:
+@dataclass(frozen=True)
+class Thresholds:
+    """Cut-offs that turn the two scores into a verdict.
+
+    The defaults are hand-picked starting points, not values fitted to data.
+    ``raglens calibrate`` can suggest better ones from labelled examples.
+
+    - ``support``: ``answer_support`` needed for ``likely_supported``.
+    - ``review``: ``answer_support`` below this gives ``needs_review``.
+    - ``relevance``: ``context_relevance`` below this gives ``needs_review``.
+
+    Raises:
+        ValueError: if a value is outside 0-1 or ``review`` is above ``support``.
+    """
+
+    support: float = 0.8
+    review: float = 0.5
+    relevance: float = 0.25
+
+    def __post_init__(self) -> None:
+        for name in ("support", "review", "relevance"):
+            value = getattr(self, name)
+            # bool is a subclass of int in Python, so reject it explicitly.
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} threshold must be a number from 0 to 1, got {value!r}")
+        if self.review > self.support:
+            raise ValueError(
+                f"review threshold ({self.review}) cannot be higher than support threshold ({self.support})"
+            )
+
+
+DEFAULT_THRESHOLDS = Thresholds()
+
+
+def decide_verdict(
+    answer_support: float,
+    context_relevance: float,
+    has_warnings: bool,
+    thresholds: Thresholds = DEFAULT_THRESHOLDS,
+) -> str:
+    """Turn scores into a verdict.
+
+    :func:`evaluate` and calibration both call this function, so a threshold
+    suggested by calibration produces exactly the verdicts it was measured with.
+    Any warning stops a result from being ``likely_supported``.
+    """
+    if answer_support >= thresholds.support and context_relevance >= thresholds.relevance:
+        verdict = "likely_supported"
+    elif answer_support < thresholds.review or context_relevance < thresholds.relevance:
+        verdict = "needs_review"
+    else:
+        verdict = "partially_supported"
+    if has_warnings and verdict == "likely_supported":
+        verdict = "partially_supported"
+    return verdict
+
+
+def evaluate(
+    question: str, context: str, answer: str, *, thresholds: Thresholds | None = None
+) -> EvaluationReport:
     """Evaluate an answer against supplied context using lexical overlap.
 
     ``context_relevance``: fraction of meaningful question terms found in the
@@ -111,25 +171,32 @@ def evaluate(question: str, context: str, answer: str) -> EvaluationReport:
     answer that are absent from the context, and a negation mismatch between
     answer and context. Any warning prevents a ``likely_supported`` verdict.
 
+    ``thresholds`` changes only the verdict, never the scores or warnings.
+    Leave it out to use :data:`DEFAULT_THRESHOLDS`.
+
     Raises:
         ValueError: if any input is not a non-empty string.
     """
     for name, value in (("question", question), ("context", context), ("answer", answer)):
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{name} must be a non-empty string")
+    if thresholds is None:
+        thresholds = DEFAULT_THRESHOLDS
 
     q_terms = _content_terms(question)
     c_terms = _content_terms(context)
     a_terms = _content_terms(answer)
 
-    relevance = len(q_terms.keys() & c_terms.keys()) / len(q_terms) if q_terms else 0.0
-    support = len(a_terms.keys() & c_terms.keys()) / len(a_terms) if a_terms else 0.0
+    # Round once, then use the rounded values everywhere, so the verdict always
+    # agrees with the scores shown in the report.
+    relevance = round(len(q_terms.keys() & c_terms.keys()) / len(q_terms), 4) if q_terms else 0.0
+    support = round(len(a_terms.keys() & c_terms.keys()) / len(a_terms), 4) if a_terms else 0.0
     unsupported = sorted(a_terms[s] for s in a_terms.keys() - c_terms.keys())
 
     explanations: list[str] = []
     if not q_terms:
         explanations.append("The question has no meaningful terms after basic stop-word filtering.")
-    elif relevance < 0.25:
+    elif relevance < thresholds.relevance:
         explanations.append(
             "Few meaningful question terms appear in the context; retrieval may be off-topic."
         )
@@ -157,19 +224,12 @@ def evaluate(question: str, context: str, answer: str) -> EvaluationReport:
             "Negation differs between answer and context (e.g. 'not', 'no'); check the meaning."
         )
 
-    if support >= 0.8 and relevance >= 0.25:
-        verdict = "likely_supported"
-    elif support < 0.5 or relevance < 0.25:
-        verdict = "needs_review"
-    else:
-        verdict = "partially_supported"
-    if warnings and verdict == "likely_supported":
-        verdict = "partially_supported"
+    verdict = decide_verdict(support, relevance, bool(warnings), thresholds)
 
     return EvaluationReport(
         question=question,
-        context_relevance=round(relevance, 4),
-        answer_support=round(support, 4),
+        context_relevance=relevance,
+        answer_support=support,
         unsupported_terms=unsupported,
         verdict=verdict,
         explanations=explanations,

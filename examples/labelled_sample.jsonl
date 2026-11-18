@@ -1,0 +1,10 @@
+{"question": "What database stores the records?", "context": "The service stores customer records in PostgreSQL.", "answer": "Customer records are stored in PostgreSQL.", "label": "supported"}
+{"question": "What is the request timeout?", "context": "Requests time out after 30 seconds.", "answer": "Requests time out after 60 seconds.", "label": "unsupported"}
+{"question": "How long are backups kept?", "context": "Nightly backups are copied to the eu-west-2 region and kept for 35 days.", "answer": "Backups are kept for 35 days in eu-west-2.", "label": "supported"}
+{"question": "How long are backups kept?", "context": "Nightly backups are copied to the eu-west-2 region and kept for 35 days.", "answer": "Backups are kept for 90 days and encrypted with a customer key.", "label": "unsupported"}
+{"question": "Who can approve a refund?", "context": "Refunds above 500 pounds must be approved by a finance manager. Smaller refunds can be approved by any support lead.", "answer": "A finance manager must approve refunds above 500 pounds.", "label": "supported"}
+{"question": "Who can approve a refund?", "context": "Refunds above 500 pounds must be approved by a finance manager. Smaller refunds can be approved by any support lead.", "answer": "Only the chief executive can approve refunds.", "label": "unsupported"}
+{"question": "What does the free plan include?", "context": "The free plan includes 3 projects and community support. Paid plans add single sign-on.", "answer": "The free plan includes 3 projects and community support.", "label": "supported"}
+{"question": "What does the free plan include?", "context": "The free plan includes 3 projects and community support. Paid plans add single sign-on.", "answer": "The free plan includes single sign-on and unlimited projects.", "label": "unsupported"}
+{"question": "Is the API rate limited?", "context": "The public API allows 100 requests per minute for each key.", "answer": "Yes, each key can make 100 requests per minute.", "label": "supported"}
+{"question": "Where is the office?", "context": "The company's only office is in Glasgow.", "answer": "The office is in Edinburgh.", "label": "unsupported"}

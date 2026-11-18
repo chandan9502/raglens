@@ -33,6 +33,8 @@ jobs:
           raglens evaluate --question "What database is used?" \
             --context "The service stores records in a PostgreSQL database." \
             --answer "It uses PostgreSQL." --fail-on needs_review
+          raglens batch examples/labelled_sample.jsonl > /dev/null
+          raglens calibrate examples/labelled_sample.jsonl --no-curve
 
   package:
     runs-on: ubuntu-latest
